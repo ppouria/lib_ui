@@ -919,8 +919,8 @@ bool ElasticScroll::eventHook(QEvent *e) {
 				if (side > 0 && requestBottomContent(1)) {
 					// The boundary wasn't a real edge: more content was
 					// appended below, let the fling continue into it.
-					if (weak && _scroller) {
-						_scroller->resendPrepareEvent();
+					if (weak) {
+						ResendScrollerPrepare(_scroller);
 					}
 					return true;
 				}
@@ -1004,7 +1004,7 @@ bool ElasticScroll::handleWheelEvent(not_null<QWheelEvent*> e, bool touch) {
 			const auto cross = _vertical ? lockDelta.x() : lockDelta.y();
 			if (std::abs(cross) > std::abs(own)
 				&& _crossAxisWheelProcess
-				&& _crossAxisWheelProcess(lockDelta.toPoint())) {
+				&& _crossAxisWheelProcess(lockDelta.toPoint(), phase)) {
 				return true;
 			}
 		} else if (locked
@@ -1016,9 +1016,11 @@ bool ElasticScroll::handleWheelEvent(not_null<QWheelEvent*> e, bool touch) {
 			// the widgets under the cursor - like the swipe-to-reply
 			// handler on the history list - of the ScrollUpdate stream.
 			return _crossAxisWheelProcess
-				&& _crossAxisWheelProcess(_vertical
-					? QPoint(qRound(lockDelta.x()), 0)
-					: QPoint(0, qRound(lockDelta.y())));
+				&& _crossAxisWheelProcess(
+					(_vertical
+						? QPoint(qRound(lockDelta.x()), 0)
+						: QPoint(0, qRound(lockDelta.y()))),
+					phase);
 		} else {
 			ownAxisLocked = locked.has_value();
 		}
@@ -1244,9 +1246,7 @@ bool ElasticScroll::handleScrollEvent(
 				if (!weak) {
 					return true;
 				}
-				if (_scroller) {
-					_scroller->resendPrepareEvent();
-				}
+				ResendScrollerPrepare(_scroller);
 			}
 		}
 	}
@@ -1358,7 +1358,10 @@ bool ElasticScroll::eventFilter(QObject *obj, QEvent *e) {
 			return true;
 		} else if (e->type() == QEvent::Resize) {
 			const auto weak = base::make_weak(this);
-			updateState();
+			reanchorOverscroll();
+			if (weak) {
+				updateState();
+			}
 			if (weak) {
 				_innerResizes.fire({});
 			}
@@ -1635,6 +1638,25 @@ void ElasticScroll::applyOverscroll(int overscroll) {
 	updateBarState();
 }
 
+// The scroll value an active Real overscroll is pinned to, from fresh sizes
+std::optional<int> ElasticScroll::lookupOverscrollPinnedEdge() const {
+	if (_overscroll < 0 && _overscrollTypeFrom == OverscrollType::Real) {
+		return 0;
+	} else if (_overscroll > 0 && _overscrollTypeTill == OverscrollType::Real) {
+		return (_vertical ? scrollHeight() : scrollWidth()) - (_vertical ? height() : width());
+	}
+	return std::nullopt;
+}
+
+void ElasticScroll::reanchorOverscroll() {
+	// Keep the widget past the (possibly moved) edge after a resize, or
+	// setState() would read the stale position as a scroll away from the
+	// edge and cancel the bounce.
+	if (const auto edge = lookupOverscrollPinnedEdge()) {
+		applyScrollTo(*edge + _overscroll, false);
+	}
+}
+
 void ElasticScroll::updateBarState() {
 	// Virtual overscroll never moves the inner widget, so it never
 	// reaches the state the bar squishes its thumb from - fold it in,
@@ -1721,6 +1743,7 @@ void ElasticScroll::resizeEvent(QResizeEvent *e) {
 			std::max(0, height() - _barTopInset - _barBottomInset))
 		: QRect(0, height() - _st.width, width(), _st.width));
 	_geometryChanged.fire({});
+	reanchorOverscroll();
 	updateState();
 }
 
@@ -1842,10 +1865,12 @@ void ElasticScroll::scrollTo(int toFrom, int toTill) {
 	} else {
 		scTo = toFrom;
 	}
-	applyScrollTo(scTo);
-	if (_scroller) {
-		_scroller->resendPrepareEvent();
+	// Scrolling to the pinned edge value to keep the overscroll displacement
+	if (const auto edge = lookupOverscrollPinnedEdge(); edge == scTo) {
+		scTo += _overscroll;
 	}
+	applyScrollTo(scTo);
+	ResendScrollerPrepare(_scroller);
 }
 
 void ElasticScroll::doSetOwnedWidget(object_ptr<QWidget> w) {
@@ -1980,6 +2005,24 @@ void ElasticScroll::setOverscrollDefaults(int from, int till, bool shift) {
 			overscrollReturn();
 		}
 	}
+}
+
+void ElasticScroll::clearOverscroll() {
+	const auto from = _overscrollTypeFrom;
+	const auto till = _overscrollTypeTill;
+	setOverscrollDefaults(0, 0);
+	if (_overscroll < 0) {
+		setOverscrollTypes(OverscrollType::None, till);
+	} else if (_overscroll > 0) {
+		setOverscrollTypes(from, OverscrollType::None);
+	} else {
+		return;
+	}
+	setOverscrollTypes(from, till);
+}
+
+void ElasticScroll::returnToOverscrollDefaults() {
+	overscrollReturn();
 }
 
 void ElasticScroll::setOverscrollBg(QColor bg) {
