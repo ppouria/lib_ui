@@ -333,7 +333,7 @@ Backend ChooseBackendDefault(Capabilities capabilities) {
 
 bool WidgetsRhiEnabled() {
 #if QT_VERSION >= QT_VERSION_CHECK(6, 7, 0)
-	if (!OptionUseQtRhi.relevant() || !OptionUseQtRhi.value()) {
+	if (!OptionUseQtRhi.value()) {
 		return false;
 	} else if (!Platform::IsMac()) {
 		if (ForceDisabled
